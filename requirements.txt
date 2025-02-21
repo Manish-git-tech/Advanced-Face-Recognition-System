@@ -1,0 +1,7 @@
+streamlit==1.16.0
+opencv-python==4.5.5.64
+numpy==1.24.2
+Pillow==9.4.0
+sqlite3==3.36.0
+insightface==0.6.1
+winsound==0.0.1
