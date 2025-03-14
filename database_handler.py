@@ -62,6 +62,35 @@ class DatabaseManager:
                     exit_time DATETIME
                 )
             ''')
+            # NEW: Visitor table – stores visitor face embedding, details, purpose, allowed exit time and status.
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS visitors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    visitor_name TEXT,
+                    face_embedding BLOB,
+                    purpose_of_visit TEXT,
+                    allowed_time DATETIME,
+                    visitor_status TEXT
+                )
+            ''')
+            # NEW: Visitor entry logs table – logs visitor id and entry time.
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS visitor_entry (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    visitor_id INTEGER,
+                    entry_time DATETIME,
+                    FOREIGN KEY(visitor_id) REFERENCES visitors(id)
+                )
+            ''')
+            # NEW: Visitor exit logs table – logs visitor id and exit time.
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS visitor_exit (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    visitor_id INTEGER,
+                    exit_time DATETIME,
+                    FOREIGN KEY(visitor_id) REFERENCES visitors(id)
+                )
+            ''')
 
             conn.commit()
     
@@ -576,7 +605,137 @@ class DatabaseManager:
                 (img_bytes, exit_time)
             )
             conn.commit()
-    
+
+    # -------------------------
+    # Visitor-related methods
+    # -------------------------
+    def save_visitor(self, visitor_name, face_embedding, purpose_of_visit, allowed_time, visitor_status="active"):
+        """
+        Save a visitor's record into the visitors table.
+        """
+        with self.get_connection() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO visitors (visitor_name, face_embedding, purpose_of_visit, allowed_time, visitor_status) VALUES (?, ?, ?, ?, ?)",
+                    (visitor_name,
+                    face_embedding.tobytes() if hasattr(face_embedding, "tobytes") else None,
+                    purpose_of_visit,
+                    allowed_time,
+                    visitor_status)
+                )
+                conn.commit()
+                cursor = conn.execute("SELECT last_insert_rowid()")
+                row = cursor.fetchone()
+                return row[0]  # Return the newly assigned visitor_id.
+            except Exception as e:
+                print("Error saving visitor:", e)
+                raise
+
+    def log_visitor_entry(self, visitor_id, entry_time=None):
+        """
+        Log a visitor's entry into the visitor_entry table.
+        """
+        with self.get_connection() as conn:
+            if entry_time is None:
+                entry_time = datetime.datetime.now()
+            conn.execute(
+                "INSERT INTO visitor_entry (visitor_id, entry_time) VALUES (?, ?)",
+                (visitor_id, entry_time)
+            )
+            conn.commit()
+
+    def log_visitor_exit(self, visitor_id, exit_time=None):
+        """
+        Log a visitor's exit into the visitor_exit table.
+        """
+        with self.get_connection() as conn:
+            if exit_time is None:
+                exit_time = datetime.datetime.now()
+            conn.execute(
+                "INSERT INTO visitor_exit (visitor_id, exit_time) VALUES (?, ?)",
+                (visitor_id, exit_time)
+            )
+            conn.commit()
+
+    def update_visitor_statuses(self):
+        """
+        Check all visitor records and update the visitor_status.
+        If the current time has passed their allowed_time, set status to 'expired';
+        otherwise, set to 'active'.
+        (Call this function every hour—e.g. via a scheduled job or background thread.)
+        """
+        with self.get_connection() as conn:
+            now = datetime.datetime.now()
+            conn.execute(
+                "UPDATE visitors SET visitor_status = 'expired' WHERE allowed_time <= ?",
+                (now,)
+            )
+            conn.execute(
+                "UPDATE visitors SET visitor_status = 'active' WHERE allowed_time > ?",
+                (now,)
+            )
+            conn.commit()
+    def get_active_visitors(self):
+        """Retrieve all visitor data"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT id, visitor_name, face_embedding, purpose_of_visit, allowed_time, visitor_status FROM visitors"
+            )
+            visitors = []
+            for row in cursor:
+                visitors.append({
+                    'id': row['id'],
+                    'visitor_name': row['visitor_name'],
+                    'face_embedding': np.frombuffer(row['face_embedding'], dtype=np.float32)
+                                    if row['face_embedding'] is not None else None,
+                    'purpose_of_visit': row['purpose_of_visit'],
+                    'allowed_time': row['allowed_time'],
+                    'visitor_status': row['visitor_status']
+                })
+            return visitors
+    def get_visitor_data(self):
+        """Retrieve all visitor data"""
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT id, visitor_name, face_embedding, purpose_of_visit, allowed_time, visitor_status FROM visitors"
+            )
+            visitors = []
+            for row in cursor:
+                visitors.append({
+                    'id': row['id'],
+                    'visitor_name': row['visitor_name'],
+                    'face_embedding': (np.frombuffer(row['face_embedding'], dtype=np.float32)
+                                    if row['face_embedding'] is not None else None),
+                    'purpose_of_visit': row['purpose_of_visit'],
+                    'allowed_time': row['allowed_time'],
+                    'visitor_status': row['visitor_status']
+                })
+            return visitors
+        
+    def get_visitor_entry_logs_by_date(self, date):
+        """
+        Retrieve visitor entry logs for a given date.
+        Returns rows containing at least: id, visitor_id, entry_time.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT id, visitor_id entry_time FROM visitor_entry WHERE DATE(entry_time) = ? ORDER BY entry_time DESC",
+                (date.strftime("%Y-%m-%d"),)
+            )
+            return cursor.fetchall()
+
+    def get_visitor_exit_logs_by_date(self, date):
+        """
+        Retrieve visitor exit logs for a given date.
+        Returns rows containing at least: id, visitor_id, exit_time.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT id, visitor_id, exit_time FROM visitor_exit WHERE DATE(exit_time) = ? ORDER BY exit_time DESC",
+                (date.strftime("%Y-%m-%d"),)
+            )
+            return cursor.fetchall()
+
 if __name__ == "__main__":
     db = DatabaseManager()
     db.initialize_database()

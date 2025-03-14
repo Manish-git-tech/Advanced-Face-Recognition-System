@@ -12,7 +12,7 @@ class FaceProcessor:
         )
         self.app.prepare(ctx_id=0, det_size=(640, 640))
         self.embedding_history_size = 10
-        self.original_weight = 0.95  # Weight given to the original embedding
+        self.original_weight = 0.93  # Weight given to the original embedding
     
     def get_embeddings(self, image):
         """Extract face embeddings from an image"""

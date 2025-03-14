@@ -20,10 +20,15 @@ class AdminApp:
         st.title("Employee Management System - Admin Panel")
 
         menu = [
-        "View Employees", "Register Employee", "Delete Employee", 
-        "View Logs", "Manage Logs", "Manual Log Entry", 
-        "Show Stranger Logs"
-    ]
+            "View Employees", 
+            "Register Employee", 
+            "Delete Employee", 
+            "View Logs", 
+            "Manage Logs", 
+            "Manual Log Entry", 
+            "Show Stranger Logs",
+            "Visitor Management"
+            ]
         choice = st.sidebar.selectbox("Menu", menu)
 
         if choice == "View Employees":
@@ -40,11 +45,65 @@ class AdminApp:
             self.manual_log_entry()
         elif choice == "Show Stranger Logs":
             self.view_stranger_logs()
+        
+        elif choice == "Visitor Management":
+            visitor_option = st.sidebar.selectbox("Visitor Options", ["Visitor Info", "Visitor Logs"])
+            if visitor_option == "Visitor Info":
+                self.view_visitor_info()
+            elif visitor_option == "Visitor Logs":
+                self.view_visitor_logs()
 
         if st.sidebar.button("Start Face Recognition"):
             self.start_Recogniton()
     def start_Recogniton(self):
         RecognitionApp().run()
+
+
+    def view_visitor_info(self):
+        """Display registered visitor information."""
+        st.header("Visitor Information")
+        # Assumes get_visitor_data() returns visitor records in a similar format as get_employee_data()
+        visitors = self.db.get_visitor_data()
+        search_str = st.text_input("Search by Visitor Name")
+        filtered_visitors = [v for v in visitors if search_str.lower() in v['visitor_name'].lower()]
+        if filtered_visitors:
+            for visitor in filtered_visitors:
+                st.subheader(f"Visitor: {visitor['visitor_name']}")
+                st.write(f"Purpose: {visitor['purpose_of_visit']}")
+                st.write(f"Allowed Time: {visitor['allowed_time']}")
+                st.write(f"Status: {visitor['visitor_status']}")
+                if visitor.get("profile_photo"):
+                    st.image(visitor["profile_photo"], width=200)
+                st.write("---")
+        else:
+            st.write("No visitor records found.")
+
+    def view_visitor_logs(self):
+        """Display visitor entry and exit logs."""
+        st.header("Visitor Logs")
+        log_type = st.radio("Select Log Type", ["Entry Logs", "Exit Logs"], key="visitor_log_type")
+        selected_date = st.date_input("Select Date", key="visitor_log_date")
+        
+        # Fetch logs using the corresponding DB functions:
+        if log_type == "Entry Logs":
+            logs = self.db.get_visitor_entry_logs_by_date(selected_date)
+        else:
+            logs = self.db.get_visitor_exit_logs_by_date(selected_date)
+        
+        if logs:
+            for log in logs:
+                log_dict = dict(log)
+                time_value = (log_dict.get('entry_time') 
+                            if log_type == "Entry Logs" else log_dict.get('exit_time'))
+                st.write(f"Log ID: {log_dict['id']} | Visitor ID: {log_dict.get('visitor_id', 'N/A')} | Time: {time_value}")
+                
+                # Button to display the visitor photo (assumes the column name for the stored photo is "visitor_face")
+                if st.button("Show Visitor Photo", key=f"visitor_photo_{log_dict['id']}"):
+                    import io
+                    img = Image.open(io.BytesIO(log_dict["visitor_face"]))
+                    st.image(img, width=200)
+        else:
+            st.write("No visitor logs found for the selected date and type.")
 
     #stranger_functions
     def view_stranger_logs(self):

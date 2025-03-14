@@ -8,6 +8,8 @@ import time
 import winsound
 from datetime import datetime, timedelta
 from PIL import Image
+from visitor_registrar import VisitorRegistrar
+from Qr_reader import read_qr_from_frame
 
 
 def play_success():
@@ -26,6 +28,13 @@ class RecognitionApp:
         self.last_log_times = {}       # For employee log cooldown
         self.stranger_log_cooldown = timedelta(seconds=10)  # adjust if needed
         self.next_stranger_id = 1      # Used to assign a temporary ID to new unknown faces
+        
+        # New: Tracking active visitor IDs & last log times.
+        self.current_visitors = set()
+        self.last_visitor_log_times = {}
+        
+        self.log_cooldown = timedelta(minutes=1)  # For employees.
+        self.visitor_log_cooldown = timedelta(minutes=1)  # Adjust for visitors if needed.
 
     def _load_known_embeddings(self):
         self.known_embeddings = {
@@ -99,38 +108,72 @@ class RecognitionApp:
             return new_stranger
 
     def process_faces(self, frame):
+        """
+        Process detected faces in the frame and attempt to match against employees,
+        then active visitors, and finally treat as strangers if no match is found.
+        Returns three lists: recognized_employees, recognized_visitors, recognized_strangers.
+        """
         faces = self.face_processor.detect_faces(frame)
         recognized_employees = []
+        recognized_visitors = []
         recognized_strangers = []
 
         for face in faces:
             current_embedding = face.embedding
 
-            # Employee matching block:
+            # --- Employee Matching Block ---
             best_employee = max(
                 self.known_embeddings.values(),
                 key=lambda emp: self.face_processor.calculate_similarity(current_embedding, emp['encoding']),
                 default=None
             )
+
             if best_employee:
                 similarity = self.face_processor.calculate_similarity(current_embedding, best_employee['encoding'])
                 if similarity > CONFIG["DETECTION_THRESHOLD"]:
                     best_employee['confidence'] = similarity
                     best_employee['bbox'] = face.bbox
                     best_employee['current_embedding'] = current_embedding
-                    # Optionally update embedding
+                    # Optionally update employee embedding over time.
                     updated_embedding = self.face_processor.update_embedding(best_employee)
                     best_employee['encoding'] = updated_embedding
                     self.db.update_employee_embedding(best_employee['employee_institute_id'], updated_embedding)
                     recognized_employees.append(best_employee)
-                    continue  # Found an employee match, no stranger logging needed.
+                    continue  # Found an employee match; skip further matching.
 
-            # Stranger processing:
+            # --- Visitor Matching Block ---
+            # Retrieve active visitors from database.
+            active_visitors = self.db.get_active_visitors()
+            best_visitor = None
+            best_visitor_sim = 0.0
+
+            if active_visitors:
+                for visitor in active_visitors:
+                    # Make sure the visitor's face_embedding is in a numerical (e.g. numpy) format.
+                    sim = self.face_processor.calculate_similarity(current_embedding, visitor["face_embedding"])
+                    if sim > best_visitor_sim:
+                        best_visitor_sim = sim
+                        best_visitor = visitor
+
+            # Use a threshold for visitor detection
+            threshold = CONFIG.get("VISITOR_DETECTION_THRESHOLD", CONFIG["DETECTION_THRESHOLD"])
+            if best_visitor and best_visitor_sim > threshold:
+                best_visitor["confidence"] = best_visitor_sim
+                best_visitor["bbox"] = face.bbox
+                best_visitor["current_embedding"] = current_embedding
+                recognized_visitors.append(best_visitor)
+                # Log the visitor entry. (Here you may wish to include cooldown logic.)
+                self.db.log_visitor_entry(best_visitor["id"])
+                continue  # Found a visitor match.
+
+            # --- Stranger Processing Block ---
             stranger_record = self._get_or_create_stranger(face, frame)
             if stranger_record is not None:
                 recognized_strangers.append(stranger_record)
 
-        return recognized_employees, recognized_strangers
+        return recognized_employees, recognized_visitors, recognized_strangers
+
+
     def determine_log_type(self, employee_id):
         last_entry = self.db.get_last_entry(employee_id)
         last_exit = self.db.get_last_exit(employee_id)
@@ -193,6 +236,34 @@ class RecognitionApp:
         cv2.putText(frame, "Stranger", (bbox[0], bbox[1] - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
 
+    def display_visitor_info(self, frame, visitor):
+        """
+        Draws a blue bounding box and text labels for a recognized visitor on the frame.
+        Assumes the visitor dictionary contains:
+        - 'bbox': bounding box coordinates, either as a NumPy array or list-like.
+        - 'visitor_name': the visitor's name.
+        - 'confidence': a confidence score for the matching.
+        """
+        # Convert bounding box to integers.
+        if isinstance(visitor['bbox'], (list, tuple)):
+            bbox = list(map(int, visitor['bbox']))
+        else:
+            bbox = visitor['bbox'].astype(int)
+            
+        # Draw a blue rectangle around the visitor.
+        cv2.rectangle(frame, (bbox[0], bbox[1]), (bbox[2], bbox[3]), (255, 0, 0), 2)
+        
+        # Display the visitor's name above the bounding box.
+        cv2.putText(frame, f"{visitor['visitor_name']}", 
+                    (bbox[0], bbox[1] - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+
+        # Display the confidence score below the bounding box.
+        cv2.putText(frame, f"Conf: {visitor.get('confidence', 0):.2f}",
+                    (bbox[0], bbox[3] + 20),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+    
+    
     def run(self):
         cap = cv2.VideoCapture(0)
         while True:
@@ -200,7 +271,22 @@ class RecognitionApp:
             if not ret:
                 break
 
-            recognized_employees, recognized_strangers = self.process_faces(frame)
+            # --- QR Code Reading for Visitor Registration ---
+            # Assume that read_qr_from_frame returns a tuple (name, purpose, deadline)
+            name, purpose, deadline = read_qr_from_frame(frame)
+            if purpose is not None:
+                cv2.putText(frame, "QR Code Detected", (50, 50),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+                cv2.imshow("QR Scanner", frame)
+                cv2.waitKey(1000)  # Show the message for 1 second.
+                print(f"QR code data: {purpose}, {deadline}, {name}")
+                # Register visitor – this function handles capturing face samples, computing embedding, etc.
+                VisitorRegistrar().register_visitor(name, purpose, deadline)
+                self.run()
+
+            # --- Face Recognition (Employees / Visitors / Strangers) ---
+            # Now process the frame and obtain three lists.
+            recognized_employees, recognized_visitors, recognized_strangers = self.process_faces(frame)
 
             # Process employee logging and display.
             for employee in recognized_employees:
@@ -210,15 +296,21 @@ class RecognitionApp:
                     log_type = self.determine_log_type(employee['id'])
                     self.log_access(employee['id'], employee['name'], log_type)
 
+            # Process visitor logging and display.
+            for visitor in recognized_visitors:
+                self.display_visitor_info(frame, visitor)  # Implement similar to employee info but with a different color, e.g., blue.
+                if visitor['id'] not in self.current_visitors:
+                    self.current_visitors.add(visitor['id'])
+                    self.db.log_visitor_entry(visitor['id'])
+                    self.last_visitor_log_times[visitor['id']] = datetime.now()
+
             # Process stranger logging and display.
             current_tracked_strangers = set()
             for stranger in recognized_strangers:
                 self.display_stranger_info(frame, stranger)
                 current_tracked_strangers.add(stranger['temp_id'])
-                # The _get_or_create_stranger function already logs an entry if needed.
-                # Update last_seen (already done in _get_or_create_stranger)
-
-            # For any strangers previously tracked but not detected now, log exit events.
+                # _get_or_create_stranger already logs an entry if needed.
+            # For any previously tracked stranger that is no longer visible, log an exit.
             for temp_id in list(self.current_strangers.keys()):
                 if temp_id not in current_tracked_strangers:
                     record = self.current_strangers.pop(temp_id)
@@ -231,6 +323,7 @@ class RecognitionApp:
 
         cap.release()
         cv2.destroyAllWindows()
+
 # Usage
 if __name__ == "__main__":
     app = RecognitionApp()

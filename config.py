@@ -14,10 +14,11 @@ CONFIG = {
     "DETECTION_THRESHOLD": 0.6,
     "DATABASE_NAME": "employees.db",
     "EMPLOYEE_DATA_ROOT": "data/employees",
+    "VISITOR_DATA_ROOT": "data/visitors",
     "EMBEDDINGS_PATH": "employee_embeddings",
     "MAX_CAPTURE_IMAGES": 10,
     "FACE_DETECTION_CONFIDENCE": 0.6,
-    "STRANGER_THRESHOLD": 0.3
+    "STRANGER_THRESHOLD": 0.5
 }
 
 # Create necessary directories
