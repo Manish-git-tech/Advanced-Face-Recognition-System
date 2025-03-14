@@ -47,6 +47,22 @@ class DatabaseManager:
                     FOREIGN KEY(employee_id) REFERENCES employees(id)
                 )
             ''')
+            # New stranger logs tables (do not store persistent stranger data)
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS stranger_entry_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stranger_face BLOB,
+                    entry_time DATETIME
+                )
+            ''')
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS stranger_exit_logs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    stranger_face BLOB,
+                    exit_time DATETIME
+                )
+            ''')
+
             conn.commit()
     
     def save_employee(self, employee_institute_id, name, embedding, profile_photo):
@@ -240,7 +256,31 @@ class DatabaseManager:
                 (date.strftime("%Y-%m-%d"),)
             )
             return cursor.fetchall()
-        
+    def get_stranger_entry_logs_by_date(self, date):
+        """
+        Retrieve stranger entry logs for a given date.
+        Returns a list of rows with columns: id, stranger_face, entry_time.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT id, stranger_face, entry_time FROM stranger_entry_logs WHERE DATE(entry_time) = ? ORDER BY entry_time DESC",
+                (date.strftime("%Y-%m-%d"),)
+            )
+            return cursor.fetchall()
+
+    def get_stranger_exit_logs_by_date(self, date):
+        """
+        Retrieve stranger exit logs for a given date.
+        Returns a list of rows with columns: id, stranger_face, exit_time.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT id, stranger_face, exit_time FROM stranger_exit_logs WHERE DATE(exit_time) = ? ORDER BY exit_time DESC",
+                (date.strftime("%Y-%m-%d"),)
+            )
+            return cursor.fetchall()
+
+
     def log_entry(self, employee_id, employee_name, entry_time=None):
         """Record employee entry"""
         with self.get_connection() as conn:
@@ -286,3 +326,257 @@ class DatabaseManager:
                 print(f"Deletion failed: {str(e)}")
                 conn.rollback()
                 return False
+
+    # -------------------------
+    # Stranger-related methods
+    # -------------------------
+
+
+    def get_stranger_photo(self, stranger_number):
+        """Retrieve stranger's photo"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT stranger_photo FROM strangers WHERE stranger_number = ?", (stranger_number,))
+            result = cursor.fetchone()
+            if result:
+                return Image.open(io.BytesIO(result['stranger_photo']))
+            return None
+
+    def get_stranger_id(self, stranger_number):
+        """Get stranger ID from stranger number"""
+        with self.get_connection() as conn:
+            cursor = conn.execute("SELECT id FROM strangers WHERE stranger_number = ?", (stranger_number,))
+            return cursor.fetchone()
+
+    def get_stranger_details(self, stranger_number):
+        with self.get_connection() as conn:
+            stranger = conn.execute("SELECT * FROM strangers WHERE stranger_number = ?",
+                                    (stranger_number,)).fetchone()
+            if not stranger:
+                return None
+
+            # Get counts and last logs from stranger_logs table
+            entry_count = conn.execute(
+                "SELECT COUNT(*) FROM stranger_logs WHERE stranger_id = ? AND log_type = 'entry'",
+                (stranger['id'],)
+            ).fetchone()
+            exit_count = conn.execute(
+                "SELECT COUNT(*) FROM stranger_logs WHERE stranger_id = ? AND log_type = 'exit'",
+                (stranger['id'],)
+            ).fetchone()
+
+            last_entry = conn.execute(
+                "SELECT MAX(log_time) FROM stranger_logs WHERE stranger_id = ? AND log_type = 'entry'",
+                (stranger['id'],)
+            ).fetchone()
+            last_exit = conn.execute(
+                "SELECT MAX(log_time) FROM stranger_logs WHERE stranger_id = ? AND log_type = 'exit'",
+                (stranger['id'],)
+            ).fetchone()
+
+            if last_entry and (not last_exit or last_entry > last_exit):
+                last_log_type = 'entry'
+                last_log_time = last_entry
+                current_status = 'entry'
+            elif last_exit:
+                last_log_type = 'exit'
+                last_log_time = last_exit
+                current_status = 'exit'
+            else:
+                last_log_type = None
+                last_log_time = None
+                current_status = None
+
+            return {
+                'stranger_number': stranger['stranger_number'],
+                'photo': Image.open(io.BytesIO(stranger['stranger_photo'])),
+                'entry_count': entry_count,
+                'exit_count': exit_count,
+                'last_log_type': last_log_type,
+                'last_log_time': last_log_time,
+                'current_status': current_status
+            }
+
+    def get_stranger_logs_by_date(self, date, log_type=None):
+        """Get stranger logs by date. If log_type is provided ('entry' or 'exit'), filter accordingly."""
+        with self.get_connection() as conn:
+            if log_type:
+                cursor = conn.execute(
+                    "SELECT stranger_logs.id, strangers.stranger_number, stranger_logs.log_time FROM stranger_logs "
+                    "JOIN strangers ON stranger_logs.stranger_id = strangers.id "
+                    "WHERE DATE(log_time) = ? AND stranger_logs.log_type = ? ORDER BY log_time DESC",
+                    (date.strftime("%Y-%m-%d"), log_type)
+                )
+            else:
+                cursor = conn.execute(
+                    "SELECT stranger_logs.id, strangers.stranger_number, stranger_logs.log_time, stranger_logs.log_type FROM stranger_logs "
+                    "JOIN strangers ON stranger_logs.stranger_id = strangers.id "
+                    "WHERE DATE(log_time) = ? ORDER BY log_time DESC",
+                    (date.strftime("%Y-%m-%d"),)
+                )
+            return cursor.fetchall()
+
+    def delete_stranger_log(self, log_id):
+        with self.get_connection() as conn:
+            try:
+                conn.execute("DELETE FROM stranger_logs WHERE id = ?", (log_id,))
+                conn.commit()
+                return True
+            except sqlite3.Error:
+                return False
+
+    def delete_stranger(self, stranger_number):
+        """Delete a stranger record and its logs"""
+        with self.get_connection() as conn:
+            try:
+                cursor = conn.execute("SELECT id FROM strangers WHERE stranger_number = ?", (stranger_number,))
+                result = cursor.fetchone()
+                if not result:
+                    print(f"Stranger with number {stranger_number} not found")
+                    return False
+                stranger_id = result['id']
+                conn.execute("DELETE FROM stranger_logs WHERE stranger_id = ?", (stranger_id,))
+                conn.execute("DELETE FROM strangers WHERE id = ?", (stranger_id,))
+                conn.commit()
+                print(f"Stranger with number {stranger_number} deleted successfully")
+                return True
+            except sqlite3.Error as e:
+                print(f"Deletion failed: {str(e)}")
+                conn.rollback()
+                return False
+
+    
+
+
+    def save_stranger(self, stranger_number, stranger_photo, stranger_face_embedding):
+        """
+        Save stranger data to the database.
+        Uses INSERT OR IGNORE so that duplicate stranger_number values are skipped.
+        """
+        with self.get_connection() as conn:
+            try:
+                # Convert the PIL Image to bytes.
+                img_byte_arr = io.BytesIO()
+                stranger_photo.save(img_byte_arr, format='JPEG')
+                img_bytes = img_byte_arr.getvalue()
+                # Convert the face embedding to bytes.
+                embedding_bytes = stranger_face_embedding.tobytes() if hasattr(stranger_face_embedding, 'tobytes') else None
+                conn.execute(
+                    "INSERT OR IGNORE INTO strangers (stranger_number, stranger_photo, stranger_face_embedding) VALUES (?, ?, ?)",
+                    (stranger_number, img_bytes, embedding_bytes)
+                )
+                conn.commit()
+            except sqlite3.IntegrityError as e:
+                print(f"Error saving stranger {stranger_number}: {e}")
+                raise
+
+    def get_stranger_data(self):
+        """
+        Retrieve all stranger records from the database.
+        Returns a list of dictionaries with keys: id, stranger_number, photo, and face_embedding.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT id, stranger_number, stranger_photo, stranger_face_embedding FROM strangers"
+            )
+            strangers = []
+            for row in cursor:
+                stranger = {
+                    'id': row['id'],
+                    'stranger_number': row['stranger_number'],
+                    'photo': Image.open(io.BytesIO(row['stranger_photo'])),
+                    'face_embedding': np.frombuffer(row['stranger_face_embedding'], dtype=np.float32) 
+                                    if row['stranger_face_embedding'] else None
+                }
+                strangers.append(stranger)
+            return strangers
+
+    def log_stranger_entry(self, stranger_id, log_time=None):
+        """
+        Log an entry event for a stranger.
+        """
+        with self.get_connection() as conn:
+            if log_time is None:
+                log_time = datetime.datetime.now()
+            conn.execute(
+                "INSERT INTO stranger_logs (stranger_id, log_type, log_time) VALUES (?, ?, ?)",
+                (stranger_id, 'entry', log_time)
+            )
+            conn.commit()
+
+    def log_stranger_exit(self, stranger_id, log_time=None):
+        """
+        Log an exit event for a stranger.
+        """
+        with self.get_connection() as conn:
+            if log_time is None:
+                log_time = datetime.datetime.now()
+            conn.execute(
+                "INSERT INTO stranger_logs (stranger_id, log_type, log_time) VALUES (?, ?, ?)",
+                (stranger_id, 'exit', log_time)
+            )
+            conn.commit()
+
+    def get_last_stranger_entry(self, stranger_id):
+        """
+        Retrieve the most recent entry log time for a stranger.
+        Returns the log time as a string or None if no entry exists.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT MAX(log_time) as last_entry FROM stranger_logs WHERE stranger_id = ? AND log_type = 'entry'",
+                (stranger_id,)
+            )
+            row = cursor.fetchone()
+            return row['last_entry'] if row and row['last_entry'] is not None else None
+
+    def get_last_stranger_exit(self, stranger_id):
+        """
+        Retrieve the most recent exit log time for a stranger.
+        Returns the log time as a string or None if no exit exists.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.execute(
+                "SELECT MAX(log_time) as last_exit FROM stranger_logs WHERE stranger_id = ? AND log_type = 'exit'",
+                (stranger_id,)
+            )
+            row = cursor.fetchone()
+            return row['last_exit'] if row and row['last_exit'] is not None else None    
+    def log_stranger_entry(self, stranger_face, entry_time=None):
+        """
+        Logs a stranger entry event.
+        :param stranger_face: A PIL Image instance representing the unknown face.
+        :param entry_time: Optional datetime; defaults to datetime.now()
+        """
+        with self.get_connection() as conn:
+            if entry_time is None:
+                entry_time = datetime.datetime.now()
+            # Convert face (PIL Image) to bytes
+            img_byte_arr = io.BytesIO()
+            stranger_face.save(img_byte_arr, format='JPEG')
+            img_bytes = img_byte_arr.getvalue()
+            conn.execute(
+                "INSERT INTO stranger_entry_logs (stranger_face, entry_time) VALUES (?, ?)",
+                (img_bytes, entry_time)
+            )
+            conn.commit()
+    def log_stranger_exit(self, stranger_face, exit_time=None):
+        """
+        Logs a stranger exit event.
+        :param stranger_face: A PIL Image instance representing the unknown face at the time of exit.
+        :param exit_time: Optional datetime; defaults to datetime.now()
+        """
+        with self.get_connection() as conn:
+            if exit_time is None:
+                exit_time = datetime.datetime.now()
+            img_byte_arr = io.BytesIO()
+            stranger_face.save(img_byte_arr, format='JPEG')
+            img_bytes = img_byte_arr.getvalue()
+            conn.execute(
+                "INSERT INTO stranger_exit_logs (stranger_face, exit_time) VALUES (?, ?)",
+                (img_bytes, exit_time)
+            )
+            conn.commit()
+    
+if __name__ == "__main__":
+    db = DatabaseManager()
+    db.initialize_database()
