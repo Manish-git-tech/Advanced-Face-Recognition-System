@@ -3,22 +3,79 @@ import os
 import cv2
 import numpy as np
 from PIL import Image
+import datetime
+import jwt  # This imports PyJWT, not a local jwt.py!
 from config import CONFIG
 from face_processor import FaceProcessor
 from database_handler import DatabaseManager
 from employee_registrar import EmployeeRegistrar
-import datetime
 from recognition_app import RecognitionApp
+
+# Retrieve JWT settings from secrets file.
+# Make sure to create a file .streamlit/secrets.toml with the following content:
+# jwt_secret_key = "your_real_secret_key_here"
+# admin_username = "your_admin_username"
+# admin_password = "your_admin_password"
+SECRET_KEY = st.secrets["jwt_secret_key"]
+EXPECTED_USERNAME = st.secrets["admin_username"]
+EXPECTED_PASSWORD = st.secrets["admin_password"]
+
+def create_jwt(username):
+    """Create a JWT token that expires after 1 hour."""
+    payload = {
+        "username": username,
+        "exp": datetime.datetime.utcnow() + datetime.timedelta(hours=1)
+    }
+    token = jwt.encode(payload, SECRET_KEY, algorithm="HS256")
+    # Note: jwt.encode returns a string in PyJWT>=2.0.
+    return token
+
+def verify_jwt(token):
+    """Verify the JWT token and return the username if valid."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        return payload["username"]
+    except (jwt.ExpiredSignatureError, jwt.InvalidTokenError):
+        return None
 
 class AdminApp:
     def __init__(self):
         self.face_processor = FaceProcessor()
         self.db = DatabaseManager()
         self.employee_registrar = EmployeeRegistrar()
+        # You can also initialize recognition modules if needed.
 
     def run(self):
-        st.title("Employee Management System - Admin Panel")
+        # --- JWT Authentication ---
+        if "jwt_token" not in st.session_state:
+            st.session_state["jwt_token"] = None
 
+        if st.session_state["jwt_token"] is None:
+            st.sidebar.subheader("Admin Login")
+            username = st.sidebar.text_input("Username", key="username")
+            password = st.sidebar.text_input("Password", type="password", key="password")
+
+            if st.sidebar.button("Login"):
+                if username == EXPECTED_USERNAME and password == EXPECTED_PASSWORD:
+                    token = create_jwt(username)
+                    st.session_state["jwt_token"] = token
+                    st.sidebar.success("Logged in successfully!")
+
+                    
+                else:
+                    st.sidebar.error("Invalid username or password")
+            st.stop()  # Halt app execution until successful login.
+        else:
+            verified_username = verify_jwt(st.session_state["jwt_token"])
+            if not verified_username:
+                st.sidebar.error("Session expired or invalid token. Please log in again.")
+                st.session_state["jwt_token"] = None
+                st.stop()
+            else:
+                st.write(f"Welcome, {verified_username}!")
+
+        # --- Main Admin Panel Content ---
+        st.title("Employee Management System - Admin Panel")
         menu = [
             "View Employees", 
             "Register Employee", 
@@ -28,7 +85,7 @@ class AdminApp:
             "Manual Log Entry", 
             "Show Stranger Logs",
             "Visitor Management"
-            ]
+        ]
         choice = st.sidebar.selectbox("Menu", menu)
 
         if choice == "View Employees":
@@ -45,7 +102,6 @@ class AdminApp:
             self.manual_log_entry()
         elif choice == "Show Stranger Logs":
             self.view_stranger_logs()
-        
         elif choice == "Visitor Management":
             visitor_option = st.sidebar.selectbox("Visitor Options", ["Visitor Info", "Visitor Logs"])
             if visitor_option == "Visitor Info":
@@ -55,6 +111,7 @@ class AdminApp:
 
         if st.sidebar.button("Start Face Recognition"):
             self.start_Recogniton()
+
     def start_Recogniton(self):
         RecognitionApp().run()
 
@@ -267,18 +324,17 @@ class AdminApp:
     def view_employees(self):
         st.header("Registered Employees")
         employees = self.db.get_employee_data()
-        
         search_id = st.text_input("Search by Employee Institute ID")
-        filtered_employees = [emp for emp in employees if search_id.lower() in emp['employee_institute_id'].lower()]
-        
+        filtered_employees = [
+            emp for emp in employees if search_id.lower() in emp['employee_institute_id'].lower()
+        ]
         for emp in filtered_employees:
             if st.button(f"{emp['name']} (ID: {emp['employee_institute_id']})"):
                 self.show_employee_details(emp['employee_institute_id'])
-
+    
     def show_employee_details(self, employee_institute_id):
         emp = self.db.get_employee_details(employee_institute_id)
         st.subheader(f"Details for {emp['name']}")
-        
         col1, col2 = st.columns(2)
         with col1:
             st.image(emp['photo'], width=200)
@@ -289,39 +345,35 @@ class AdminApp:
             st.write(f"Exit Count: {emp['exit_count']}")
             st.write(f"Last Log: {emp['last_log_type']} at {emp['last_log_time']}")
             st.write(f"Current Status: {'Inside Campus' if emp['current_status'] == 'entry' else 'Outside Campus'}")
-            
             if emp['last_log_time']:
-                last_log_time = datetime.datetime.strptime(emp['last_log_time'], "%Y-%m-%d %H:%M:%S.%f")
-                time_since_last_log = datetime.datetime.now() - last_log_time
-                
-                # Calculate hours and minutes
-                total_seconds = int(time_since_last_log.total_seconds())
+                try:
+                    last_log_time = datetime.datetime.strptime(emp['last_log_time'], "%Y-%m-%d %H:%M:%S.%f")
+                except Exception:
+                    last_log_time = datetime.datetime.strptime(emp['last_log_time'], "%Y-%m-%d %H:%M:%S")
+                delta = datetime.datetime.now() - last_log_time
+                total_seconds = int(delta.total_seconds())
                 hours, remainder = divmod(total_seconds, 3600)
-                minutes, seconds = divmod(remainder, 60)
-                
-                # Format the output
-                time_display = f"{hours} hour{'s' if hours != 1 else ''} and {minutes} minute{'s' if minutes != 1 else ''}"
-                st.write(f"Time since last log: {time_display}")
-
-
-
-
+                minutes, _ = divmod(remainder, 60)
+                st.write(f"Time since last log: {hours} hour{'s' if hours != 1 else ''} and "
+                         f"{minutes} minute{'s' if minutes != 1 else ''}")
+    
     def register_employee(self):
         st.header("Register New Employee")
         name = st.text_input("Employee Name")
         institute_id = st.text_input("Employee Institute ID")
-
         registration_method = st.radio("Registration Method", ["Upload Photos", "Live Capture"])
-
         if registration_method == "Upload Photos":
-            uploaded_files = st.file_uploader("Upload 10 face images", type=["jpg", "jpeg", "png"], accept_multiple_files=True)
+            uploaded_files = st.file_uploader(
+                "Upload 10 face images", type=["jpg", "jpeg", "png"], 
+                accept_multiple_files=True
+            )
             if st.button("Register") and name and institute_id and len(uploaded_files) == 10:
                 self.process_uploaded_photos(name, institute_id, uploaded_files)
         else:
             if st.button("Start Live Registration") and name and institute_id:
                 self.employee_registrar.capture_face_samples(name, institute_id)
                 st.success(f"Live registration completed for {name}")
-
+    
     def process_uploaded_photos(self, name, institute_id, uploaded_files):
         embeddings = []
         for file in uploaded_files:
@@ -330,86 +382,82 @@ class AdminApp:
             embeds = self.face_processor.get_embeddings(cv_image)
             if embeds:
                 embeddings.append(embeds[0])
-
         if embeddings:
             avg_embedding = np.mean(embeddings, axis=0)
             avg_embedding /= np.linalg.norm(avg_embedding)
             try:
-                self.db.save_employee(institute_id, name, avg_embedding, Image.open(uploaded_files[0]))
+                self.db.save_employee(
+                    institute_id, name, avg_embedding, Image.open(uploaded_files[0])
+                )
                 st.success(f"Successfully registered {name}")
             except Exception as e:
                 st.error(f"Failed to register employee: {str(e)}")
         else:
             st.error("Failed to generate embeddings. Please try again.")
-
+    
     def manual_log_entry(self):
         st.header("Manual Log Entry")
         institute_id = st.text_input("Employee Institute ID")
         log_type = st.radio("Log Type", ["Entry", "Exit"])
-        date = st.date_input("Log Date", value=datetime.date.today())
-        time = st.time_input("Log Time", value=datetime.datetime.now().time())
-        log_time = datetime.datetime.combine(date, time)
-
-
+        date_val = st.date_input("Log Date", value=datetime.date.today())
+        time_val = st.time_input("Log Time", value=datetime.datetime.now().time())
+        log_time = datetime.datetime.combine(date_val, time_val)
         if st.button("Add Log Entry"):
             employee_ID = self.db.get_employee_id(institute_id)['id']
-            name = self.db.get_employee_name(institute_id)['name']
+            name_rec = self.db.get_employee_name(institute_id)
+            employee_name = name_rec['name'] if name_rec else "Unknown"
             if employee_ID:
                 if log_type == "Entry":
-                    self.db.log_entry(employee_ID, name)
+                    self.db.log_entry(employee_ID, employee_name, log_time)
                 else:
-                    self.db.log_exit(employee_ID, name)
-                st.success(f"{log_type} log added successfully for {name}")
+                    self.db.log_exit(employee_ID, employee_name, log_time)
+                st.success(f"{log_type} log added successfully for {employee_name}")
             else:
                 st.error("Employee not found")
-
+    
     def delete_employee(self):
         st.header("Delete Employee")
         employees = self.db.get_employee_data()
-        
         search_id = st.text_input("Search by Employee Institute ID")
-        filtered_employees = [emp for emp in employees if search_id.lower() in emp['employee_institute_id'].lower()]
-        
+        filtered_employees = [
+            emp for emp in employees if search_id.lower() in emp['employee_institute_id'].lower()
+        ]
         selected_employees = []
         for emp in filtered_employees:
             if st.checkbox(f"{emp['name']} (ID: {emp['employee_institute_id']})"):
                 selected_employees.append(emp['employee_institute_id'])
-        
         if st.button("Delete Selected Employees"):
             for emp_id in selected_employees:
                 if self.db.delete_employee(emp_id):
                     st.success(f"Employee with ID {emp_id} deleted successfully")
                 else:
                     st.error(f"Failed to delete employee with ID {emp_id}")
-
+    
     def view_logs(self):
         st.header("View Logs")
         log_type = st.radio("Select Log Type", ["Entry Logs", "Exit Logs"])
-        date = st.date_input("Select Date")
-        
+        date_val = st.date_input("Select Date")
         if log_type == "Entry Logs":
-            logs = self.db.get_entry_logs_by_date(date)
+            logs = self.db.get_entry_logs_by_date(date_val)
             self.display_logs(logs, "Entry")
         else:
-            logs = self.db.get_exit_logs_by_date(date)
+            logs = self.db.get_exit_logs_by_date(date_val)
             self.display_logs(logs, "Exit")
-
+    
     def display_logs(self, logs, log_type):
         for log in logs:
             st.write(f"{log_type} - Employee: {log[1]}, Time: {log[2]}")
-
+    
     def manage_logs(self):
         st.header("Manage Logs")
         log_type = st.radio("Select Log Type", ["Entry Logs", "Exit Logs"])
-        date = st.date_input("Select Date")
-        
+        date_val = st.date_input("Select Date")
         if log_type == "Entry Logs":
-            logs = self.db.get_entry_logs_by_date(date)
+            logs = self.db.get_entry_logs_by_date(date_val)
             selected_logs = self.select_logs(logs, "Entry")
         else:
-            logs = self.db.get_exit_logs_by_date(date)
+            logs = self.db.get_exit_logs_by_date(date_val)
             selected_logs = self.select_logs(logs, "Exit")
-        
         if st.button("Delete Selected Logs"):
             for log_id in selected_logs:
                 if log_type == "Entry Logs":
@@ -422,14 +470,56 @@ class AdminApp:
                         st.success(f"Exit log {log_id} deleted successfully")
                     else:
                         st.error(f"Failed to delete exit log {log_id}")
-
+    
     def select_logs(self, logs, log_type):
         selected_logs = []
         for log in logs:
             if st.checkbox(f"{log_type} - Employee: {log[1]}, Time: {log[2]}", key=log[0]):
                 selected_logs.append(log[0])
         return selected_logs
+    
+    # ----- Visitor Management Functions -----
+    def view_visitor_info(self):
+        st.header("Visitor Information")
+        visitors = self.db.get_visitor_data()
+        search_str = st.text_input("Search by Visitor Name")
+        filtered_visitors = [v for v in visitors if search_str.lower() in v['visitor_name'].lower()]
+        if filtered_visitors:
+            for visitor in filtered_visitors:
+                st.subheader(f"Visitor: {visitor['visitor_name']}")
+                st.write(f"Purpose: {visitor['purpose_of_visit']}")
+                st.write(f"Allowed Time: {visitor['allowed_time']}")
+                st.write(f"Status: {visitor['visitor_status']}")
+                if visitor.get("profile_photo"):
+                    st.image(visitor["profile_photo"], width=200)
+                st.write("---")
+        else:
+            st.write("No visitor records found.")
+    
+    def view_visitor_logs(self):
+        st.header("Visitor Logs")
+        log_type = st.radio("Select Log Type", ["Entry Logs", "Exit Logs"], key="visitor_log_type")
+        selected_date = st.date_input("Select Date", key="visitor_log_date")
+        if log_type == "Entry Logs":
+            logs = self.db.get_visitor_entry_logs_by_date(selected_date)
+        else:
+            logs = self.db.get_visitor_exit_logs_by_date(selected_date)
+        if logs:
+            for log in logs:
+                log_dict = dict(log)
+                time_value = (log_dict.get('entry_time') 
+                              if log_type == "Entry Logs" else log_dict.get('exit_time'))
+                st.write(
+                    f"Log ID: {log_dict['id']} | Visitor ID: {log_dict.get('visitor_id', 'N/A')} | Time: {time_value}"
+                )
+                if st.button("Show Visitor Photo", key=f"visitor_photo_{log_dict['id']}"):
+                    import io
+                    img = Image.open(io.BytesIO(log_dict["visitor_face"]))
+                    st.image(img, width=200)
+        else:
+            st.write("No visitor logs found for the selected date and type.")
 
 if __name__ == "__main__":
     app = AdminApp()
     app.run()
+
